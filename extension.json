@@ -1,0 +1,13 @@
+{
+  "name": "UART HCI Decoder",
+  "apiVersion": "1.0.0",
+  "author": "Brian Gomberg",
+  "version": "0.1.0",
+  "description": "Decodes HCI packets sent over UART",
+  "extensions": {
+    "HCI": {
+      "type": "HighLevelAnalyzer",
+      "entryPoint": "hci.HciHla"
+    }
+  }
+}
