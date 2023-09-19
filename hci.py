@@ -6,6 +6,19 @@ import struct
 
 
 LE_OPCODE_DESC = {
+    0x0406: "HCI Disconnect",
+    0x041D: "HCI Read Remote Version Information",
+
+    0x0C01: "HCI Set Event Mask",
+    0x0C03: "HCI Reset",
+    0x0C2D: "HCI Read Transmit Power Level",
+
+    0x1001: "HCI Read Local Version Information",
+    0x1002: "HCI Read Local Supported Commands",
+    0x1003: "HCI Read Local Supported Features",
+    0x1009: "HCI Read BD ADDR",
+    0x1405: "HCI Read RSSI",
+
     0x2001: "LE Set Event Mask",
     0x2002: "LE Read Buffer Size",
     0x2003: "LE Read Local Supported Features",
@@ -53,6 +66,9 @@ LE_OPCODE_DESC = {
     0x202F: "LE Read Maximum Data Length",
 }
 
+def get_opcode_desc(opcode):
+    return LE_OPCODE_DESC.get(opcode, f"Unknown Opcode 0x{opcode:x}")
+
 BT_EVENT_DESC = {
     0x05: "Disconnection Complete",
     0x08: "Encryption Change",
@@ -65,6 +81,9 @@ BT_EVENT_DESC = {
     0x30: "Encryption Key Refresh Complete",
     0x57: "Authenticated Payload Timeout Expired",
 }
+
+def get_event_desc(event):
+    return BT_EVENT_DESC.get(event, f"Unknown Event 0x{event:x}")
 
 LE_SUBEVENT_DESC = {
     0x01: "LE Connection Complete",
@@ -80,6 +99,8 @@ LE_SUBEVENT_DESC = {
     0x0B: "LE Direct Advertising Report",
 }
 
+def get_le_subevent_desc(subevent):
+    return LE_SUBEVENT_DESC.get(subevent, f"Unknown LE Event 0x{subevent:x}")
 
 class Packet(ABC):
     HEADER_FMT = None
@@ -120,7 +141,7 @@ class CommandPacket(Packet):
         opcode, param_len = self._header
         return AnalyzerFrame('command', start_time, end_time, {
             'packet_type': "Command",
-            'operation': LE_OPCODE_DESC.get(opcode, "Unknown Opcode"),
+            'operation': get_opcode_desc(opcode),
             'length': param_len,
         })
 
@@ -152,27 +173,20 @@ class EventPacket(Packet):
 
     def get_analyzer_frame(self, start_time, end_time):
         event_code = self._header[0]
-        if event_code in BT_EVENT_DESC:
-            if event_code == 0x0E:
-                assert len(self._data) >= 3
-                num_packets = self._data[0]
-                opcode = struct.unpack("<H", self._data[1:3])[0]
-                status = self._data[3]
-                opcode_str = LE_OPCODE_DESC[opcode] if opcode in LE_OPCODE_DESC else f"Unknown Opcode"
-                status_str = "Success" if status == 0 else f"Error {hex(status)}"
-                event_str = f"Command Complete | {status_str} | {opcode_str}"
-            else:
-                event_str = BT_EVENT_DESC[event_code]
+        event_str = get_event_desc(event_code)
+        if event_code == 0x0E:
+            assert len(self._data) >= 3
+            num_packets = self._data[0]
+            opcode = struct.unpack("<H", self._data[1:3])[0]
+            status = self._data[3]
+            opcode_str = get_opcode_desc(opcode)
+            status_str = "Success" if status == 0 else f"Error {hex(status)}"
+            event_str = f"Command Complete | {status_str} | {opcode_str}"
         elif event_code == 0x3e:
             # LE event
             assert len(self._data) >= 1
             subevent = self._data[0]
-            if subevent in LE_SUBEVENT_DESC:
-                event_str = LE_SUBEVENT_DESC[subevent]
-            else:
-                event_str = f"Unknown LE Event"
-        else:
-            event_str = f"Unknown Event"
+            event_str = get_le_subevent_desc(subevent)
         return AnalyzerFrame('event', start_time, end_time, {
             'packet_type': "Event",
             'operation': event_str,
@@ -191,12 +205,31 @@ RESULT_TYPES = {}
 for p in PACKETS.values():
     RESULT_TYPES.update({k: {'format': v} for k, v in p.RESULT_TYPES.items()})
 
+class PacketDecoder:
+    def __init__(self):
+        self._packet = None
+        self._start_time = None
 
-class HciHla(HighLevelAnalyzer):
+    def decode(self, data, start_time, end_time):
+        if not self._packet:
+            # This is the start of a new packet - determine the type based on the first byte
+            packet_class = PACKETS.get(data[0], None)
+            if not packet_class:
+                return AnalyzerFrame('unknown', start_time, end_time, {})
+            self._start_time = start_time
+            self._packet = packet_class()
+        elif self._packet.process_data(data):
+            # This is the end of the packet
+            result = self._packet.get_analyzer_frame(self._start_time, end_time)
+            self._packet = None
+            self._start_time = None
+            return result
+
+class SerialHciHla(HighLevelAnalyzer):
     result_types = RESULT_TYPES
 
     def __init__(self):
-        self._packet = None
+        self.decoder = PacketDecoder()
         self._start_time = None
 
     def decode(self, frame: AnalyzerFrame):
@@ -207,16 +240,75 @@ class HciHla(HighLevelAnalyzer):
             # Ignore error frames (i.e. framing / parity errors)
             return
         data = frame.data['data']
-        if not self._packet:
-            # This is the start of a new packet - determine the type based on the first byte
-            packet_class = PACKETS.get(data[0], None)
-            if not packet_class:
-                return AnalyzerFrame('unknown', frame.start_time, frame.end_time, {})
-            self._start_time = frame.start_time
-            self._packet = packet_class()
-        elif self._packet.process_data(data):
-            # This is the end of the packet
-            result = self._packet.get_analyzer_frame(self._start_time, frame.end_time)
-            self._packet = None
-            self._start_time = None
-            return result
+        return self.decoder.decode(data, frame.start_time, frame.end_time)
+
+BLUENRG_HEADER_LEN = 5
+
+class BlueNrgHla(HighLevelAnalyzer):
+    result_types = {
+        'invalid_header_ctrl': {'format': 'Invalid header control byte: {{data.ctrl}}'},
+        'low_level_error': {'format': 'Low-level error'},
+        'unexpected_data': {'format': 'Unexpected data (state = {{data.state}})'},
+        **RESULT_TYPES,
+    }
+
+    def __init__(self):
+        self.mosi_decoder = PacketDecoder()
+        self.miso_decoder = PacketDecoder()
+        self.state = None
+        self.header_start_time = None
+        self.header_bytes_mosi = b''
+        self.header_bytes_miso = b''
+
+    def decode_header(self, end_time):
+        if self.header_bytes_miso[0] != 0x02:
+            # Not ready
+            self.state = 'not_ready'
+            return
+
+        ctrl = self.header_bytes_mosi[0]
+        if ctrl == 0x0A:
+            self.state = 'write'
+        elif ctrl == 0x0B:
+            self.state = 'read'
+        else:
+            self.state = 'error'
+            return AnalyzerFrame('invalid_header_ctrl', self.header_start_time, end_time, {'ctrl': ctrl})
+
+    def decode(self, frame: AnalyzerFrame):
+        if frame.type == 'enable':
+            self.state = None
+            self.header_bytes_mosi = b''
+            self.header_bytes_miso = b''
+        elif frame.type == 'result':
+            if self.state is None:
+                if not self.header_bytes_mosi:
+                    self.header_start_time = frame.start_time
+
+                self.header_bytes_mosi += frame.data['mosi']
+                self.header_bytes_miso += frame.data['miso']
+                if len(self.header_bytes_mosi) == BLUENRG_HEADER_LEN:
+                    self.decode_header(frame.end_time)
+                return
+            elif self.state == 'read':
+                decoder = self.miso_decoder
+                data = frame.data['miso']
+                direction = 'RX'
+            elif self.state == 'write':
+                decoder = self.mosi_decoder
+                data = frame.data['mosi']
+                direction = 'TX'
+            else:
+                return AnalyzerFrame('unexpected_data', frame.start_time, frame.end_time, {'state': self.state})
+
+            out_frame = decoder.decode(data, self.header_start_time, frame.end_time)
+            if out_frame is None:
+                return
+            if out_frame.type == 'async':
+                out_frame.data['packet_type'] += f' {direction}'
+
+            return out_frame
+        elif frame.type == 'error':
+            return AnalyzerFrame('low_level_error', frame.start_time, frame.end_time, {})
+        else:
+            pass
