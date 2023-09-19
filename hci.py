@@ -6,6 +6,19 @@ import struct
 
 
 LE_OPCODE_DESC = {
+    0x0406: "HCI Disconnect",
+    0x041D: "HCI Read Remote Version Information",
+
+    0x0C01: "HCI Set Event Mask",
+    0x0C03: "HCI Reset",
+    0x0C2D: "HCI Read Transmit Power Level",
+
+    0x1001: "HCI Read Local Version Information",
+    0x1002: "HCI Read Local Supported Commands",
+    0x1003: "HCI Read Local Supported Features",
+    0x1009: "HCI Read BD ADDR",
+    0x1405: "HCI Read RSSI",
+
     0x2001: "LE Set Event Mask",
     0x2002: "LE Read Buffer Size",
     0x2003: "LE Read Local Supported Features",
