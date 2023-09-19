@@ -53,6 +53,9 @@ LE_OPCODE_DESC = {
     0x202F: "LE Read Maximum Data Length",
 }
 
+def get_opcode_desc(opcode):
+    return LE_OPCODE_DESC.get(opcode, f"Unknown Opcode 0x{opcode:x}")
+
 BT_EVENT_DESC = {
     0x05: "Disconnection Complete",
     0x08: "Encryption Change",
@@ -65,6 +68,9 @@ BT_EVENT_DESC = {
     0x30: "Encryption Key Refresh Complete",
     0x57: "Authenticated Payload Timeout Expired",
 }
+
+def get_event_desc(event):
+    return BT_EVENT_DESC.get(event, f"Unknown Event 0x{event:x}")
 
 LE_SUBEVENT_DESC = {
     0x01: "LE Connection Complete",
@@ -80,6 +86,8 @@ LE_SUBEVENT_DESC = {
     0x0B: "LE Direct Advertising Report",
 }
 
+def get_le_subevent_desc(subevent):
+    return LE_SUBEVENT_DESC.get(subevent, f"Unknown LE Event 0x{subevent:x}")
 
 class Packet(ABC):
     HEADER_FMT = None
@@ -120,7 +128,7 @@ class CommandPacket(Packet):
         opcode, param_len = self._header
         return AnalyzerFrame('command', start_time, end_time, {
             'packet_type': "Command",
-            'operation': LE_OPCODE_DESC.get(opcode, "Unknown Opcode"),
+            'operation': get_opcode_desc(opcode),
             'length': param_len,
         })
 
@@ -152,27 +160,20 @@ class EventPacket(Packet):
 
     def get_analyzer_frame(self, start_time, end_time):
         event_code = self._header[0]
-        if event_code in BT_EVENT_DESC:
-            if event_code == 0x0E:
-                assert len(self._data) >= 3
-                num_packets = self._data[0]
-                opcode = struct.unpack("<H", self._data[1:3])[0]
-                status = self._data[3]
-                opcode_str = LE_OPCODE_DESC[opcode] if opcode in LE_OPCODE_DESC else f"Unknown Opcode"
-                status_str = "Success" if status == 0 else f"Error {hex(status)}"
-                event_str = f"Command Complete | {status_str} | {opcode_str}"
-            else:
-                event_str = BT_EVENT_DESC[event_code]
+        event_str = get_event_desc(event_code)
+        if event_code == 0x0E:
+            assert len(self._data) >= 3
+            num_packets = self._data[0]
+            opcode = struct.unpack("<H", self._data[1:3])[0]
+            status = self._data[3]
+            opcode_str = get_opcode_desc(opcode)
+            status_str = "Success" if status == 0 else f"Error {hex(status)}"
+            event_str = f"Command Complete | {status_str} | {opcode_str}"
         elif event_code == 0x3e:
             # LE event
             assert len(self._data) >= 1
             subevent = self._data[0]
-            if subevent in LE_SUBEVENT_DESC:
-                event_str = LE_SUBEVENT_DESC[subevent]
-            else:
-                event_str = f"Unknown LE Event"
-        else:
-            event_str = f"Unknown Event"
+            event_str = get_le_subevent_desc(subevent)
         return AnalyzerFrame('event', start_time, end_time, {
             'packet_type': "Event",
             'operation': event_str,
