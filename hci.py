@@ -205,12 +205,31 @@ RESULT_TYPES = {}
 for p in PACKETS.values():
     RESULT_TYPES.update({k: {'format': v} for k, v in p.RESULT_TYPES.items()})
 
+class PacketDecoder:
+    def __init__(self):
+        self._packet = None
+        self._start_time = None
 
-class HciHla(HighLevelAnalyzer):
+    def decode(self, data, start_time, end_time):
+        if not self._packet:
+            # This is the start of a new packet - determine the type based on the first byte
+            packet_class = PACKETS.get(data[0], None)
+            if not packet_class:
+                return AnalyzerFrame('unknown', start_time, end_time, {})
+            self._start_time = start_time
+            self._packet = packet_class()
+        elif self._packet.process_data(data):
+            # This is the end of the packet
+            result = self._packet.get_analyzer_frame(self._start_time, end_time)
+            self._packet = None
+            self._start_time = None
+            return result
+
+class SerialHciHla(HighLevelAnalyzer):
     result_types = RESULT_TYPES
 
     def __init__(self):
-        self._packet = None
+        self.decoder = PacketDecoder()
         self._start_time = None
 
     def decode(self, frame: AnalyzerFrame):
@@ -221,16 +240,75 @@ class HciHla(HighLevelAnalyzer):
             # Ignore error frames (i.e. framing / parity errors)
             return
         data = frame.data['data']
-        if not self._packet:
-            # This is the start of a new packet - determine the type based on the first byte
-            packet_class = PACKETS.get(data[0], None)
-            if not packet_class:
-                return AnalyzerFrame('unknown', frame.start_time, frame.end_time, {})
-            self._start_time = frame.start_time
-            self._packet = packet_class()
-        elif self._packet.process_data(data):
-            # This is the end of the packet
-            result = self._packet.get_analyzer_frame(self._start_time, frame.end_time)
-            self._packet = None
-            self._start_time = None
-            return result
+        return self.decoder.decode(data, frame.start_time, frame.end_time)
+
+BLUENRG_HEADER_LEN = 5
+
+class BlueNrgHla(HighLevelAnalyzer):
+    result_types = {
+        'invalid_header_ctrl': {'format': 'Invalid header control byte: {{data.ctrl}}'},
+        'low_level_error': {'format': 'Low-level error'},
+        'unexpected_data': {'format': 'Unexpected data (state = {{data.state}})'},
+        **RESULT_TYPES,
+    }
+
+    def __init__(self):
+        self.mosi_decoder = PacketDecoder()
+        self.miso_decoder = PacketDecoder()
+        self.state = None
+        self.header_start_time = None
+        self.header_bytes_mosi = b''
+        self.header_bytes_miso = b''
+
+    def decode_header(self, end_time):
+        if self.header_bytes_miso[0] != 0x02:
+            # Not ready
+            self.state = 'not_ready'
+            return
+
+        ctrl = self.header_bytes_mosi[0]
+        if ctrl == 0x0A:
+            self.state = 'write'
+        elif ctrl == 0x0B:
+            self.state = 'read'
+        else:
+            self.state = 'error'
+            return AnalyzerFrame('invalid_header_ctrl', self.header_start_time, end_time, {'ctrl': ctrl})
+
+    def decode(self, frame: AnalyzerFrame):
+        if frame.type == 'enable':
+            self.state = None
+            self.header_bytes_mosi = b''
+            self.header_bytes_miso = b''
+        elif frame.type == 'result':
+            if self.state is None:
+                if not self.header_bytes_mosi:
+                    self.header_start_time = frame.start_time
+
+                self.header_bytes_mosi += frame.data['mosi']
+                self.header_bytes_miso += frame.data['miso']
+                if len(self.header_bytes_mosi) == BLUENRG_HEADER_LEN:
+                    self.decode_header(frame.end_time)
+                return
+            elif self.state == 'read':
+                decoder = self.miso_decoder
+                data = frame.data['miso']
+                direction = 'RX'
+            elif self.state == 'write':
+                decoder = self.mosi_decoder
+                data = frame.data['mosi']
+                direction = 'TX'
+            else:
+                return AnalyzerFrame('unexpected_data', frame.start_time, frame.end_time, {'state': self.state})
+
+            out_frame = decoder.decode(data, self.header_start_time, frame.end_time)
+            if out_frame is None:
+                return
+            if out_frame.type == 'async':
+                out_frame.data['packet_type'] += f' {direction}'
+
+            return out_frame
+        elif frame.type == 'error':
+            return AnalyzerFrame('low_level_error', frame.start_time, frame.end_time, {})
+        else:
+            pass

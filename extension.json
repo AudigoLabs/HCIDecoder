@@ -5,9 +5,13 @@
   "version": "0.1.0",
   "description": "Decodes HCI packets sent over UART",
   "extensions": {
-    "HCI": {
+    "UART HCI": {
       "type": "HighLevelAnalyzer",
-      "entryPoint": "hci.HciHla"
+      "entryPoint": "hci.SerialHciHla"
+    },
+    "SPI HCI (BlueNRG/Zephyr)": {
+      "type": "HighLevelAnalyzer",
+      "entryPoint": "hci.BlueNrgHla"
     }
   }
 }
